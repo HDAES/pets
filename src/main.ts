@@ -25,8 +25,9 @@ async function selectPet(id: string) {
 async function applySettings(next: Partial<Settings>) {
   settings = { ...settings, ...next }; await api("save_settings", { settings });
   await appWindow.setAlwaysOnTop(settings.alwaysOnTop); await appWindow.setIgnoreCursorEvents(settings.clickThrough);
-  document.body.classList.toggle("interactive", !settings.clickThrough);
+  reflectSettings();
 }
+function reflectSettings() { document.body.classList.toggle("interactive", !settings.clickThrough); }
 function animate(now: number) { state.tick(now); renderer.draw(state, settings.scale); requestAnimationFrame(animate); }
 function setState(name: AnimationName, direction = 0) { state.set(name, direction); }
 function setupGaze() {
@@ -56,6 +57,7 @@ function settingsPage() {
 function toggle(key: keyof Settings, label: string) { return `<label class="toggle">${label}<input type="checkbox" id="${key}" ${settings[key] ? "checked" : ""}></label>`; }
 async function main() {
   settings = await api<Settings>("get_settings"); await refreshPets(); renderer = new SpriteRenderer(canvas); await selectPet(settings.currentPetId); await applySettings({}); if (new URLSearchParams(location.search).has("settings")) settingsPage(); else setupGaze();
+  await listen("settings-changed", event => { settings = event.payload as Settings; reflectSettings(); });
   await listen("open-settings", settingsPage); await listen("reset-position", () => appWindow.setPosition(new LogicalPosition(100, 100))); await listen("debug-animation", e => { const value = e.payload as string; if (value.startsWith("gaze:")) setState("gaze", Number(value.slice(5))); else setState(value as AnimationName); });
   requestAnimationFrame(animate);
 }

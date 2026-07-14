@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Pet Desk",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "identifier": "com.petdesk.app",
   "build": { "beforeDevCommand": "npm run dev", "beforeBuildCommand": "npm run build", "devUrl": "http://localhost:1420", "frontendDist": "../dist" },
   "app": { "windows": [{ "label": "pet", "title": "Pet Desk", "width": 192, "height": 208, "transparent": true, "decorations": false, "alwaysOnTop": true, "skipTaskbar": true, "resizable": false, "shadow": false, "visible": true }], "security": { "csp": null } },

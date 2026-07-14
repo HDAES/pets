@@ -56,7 +56,11 @@ fn custom_record(dir:PathBuf) -> Result<PetRecord,String> { let m=validate_packa
 #[tauri::command] fn get_settings(state:tauri::State<AppState>)->Settings{state.settings.lock().unwrap().clone()}
 #[tauri::command] fn save_settings(app:AppHandle,state:tauri::State<AppState>,settings:Settings)->Result<(),String>{
   if let Some(w)=app.get_webview_window("pet") { w.set_always_on_top(settings.always_on_top).map_err(|e|e.to_string())?; w.set_ignore_cursor_events(settings.click_through).map_err(|e|e.to_string())?; }
-  if settings.autostart { let _=app.autolaunch().enable(); } else { let _=app.autolaunch().disable(); } write_settings(&app,&settings)?; *state.settings.lock().unwrap()=settings; Ok(())
+  if settings.autostart { let _=app.autolaunch().enable(); } else { let _=app.autolaunch().disable(); }
+  write_settings(&app,&settings)?;
+  *state.settings.lock().unwrap()=settings.clone();
+  let _=app.emit("settings-changed", &settings);
+  Ok(())
 }
 #[tauri::command] fn pet_data_dir(app:AppHandle)->Result<String,String>{let p=pets_dir(&app)?;fs::create_dir_all(&p).map_err(|e|e.to_string())?;Ok(p.to_string_lossy().into_owned())}
 #[tauri::command] fn delete_custom_pet(app:AppHandle,id:String)->Result<(),String>{ let p=pets_dir(&app)?.join(&id); if !p.exists(){return Err("不能删除内置宠物或不存在的宠物".into())}; fs::remove_dir_all(p).map_err(|e|e.to_string()) }
