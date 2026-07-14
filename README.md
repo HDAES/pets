@@ -25,7 +25,7 @@ npm run tauri build -- --bundles nsis
 
 安装包输出在 `src-tauri/target/release/bundle/nsis/`，为 `.exe`。NSIS 安装程序从“应用和功能”或卸载程序卸载。安装后请验证：启动、托盘显示/隐藏、穿透切换、拖动、重启位置恢复、导入/删除宠物及开机自启。
 
-推送到 `main` 或手动运行 GitHub Actions 时，工作流会在 Windows runner 上运行前端测试并生成 NSIS `.exe`，可从 Actions 的 `Pet-Desk-Windows-NSIS` artifact 下载。推送以 `v` 开头的标签（例如 `v0.1.0`）还会自动创建公开 GitHub Release，并把 `.exe` 作为永久下载附件发布。
+每次推送到 `main`，或手动运行 GitHub Actions 时，工作流都会在 Windows runner 上运行前端测试并生成 NSIS `.exe`，可从该次 Actions 任务的 `Pet-Desk-Windows-NSIS` artifact 下载。标签不再触发额外构建或自动创建 Release。
 
 ## 数据位置
 
