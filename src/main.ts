@@ -58,4 +58,9 @@ async function main() {
   await listen("open-settings", settingsPage); await listen("reset-position", () => appWindow.setPosition(new LogicalPosition(100, 100))); await listen("debug-animation", e => { const value = e.payload as string; if (value.startsWith("gaze:")) setState("gaze", Number(value.slice(5))); else setState(value as AnimationName); });
   requestAnimationFrame(animate);
 }
-main().catch(console.error);
+main().catch(async error => {
+  console.error(error);
+  document.body.classList.add("startup-failed", "interactive");
+  document.body.innerHTML = `<div class="startup-error"><strong>桌面宠物启动失败</strong><span>${String(error)}</span><small>请通过系统托盘退出后重新启动。</small></div>`;
+  await appWindow.setIgnoreCursorEvents(false).catch(() => undefined);
+});
