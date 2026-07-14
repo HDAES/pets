@@ -56,7 +56,55 @@ fn custom_record(app:&AppHandle, dir:PathBuf) -> Result<PetRecord,String> { let 
 fn copy_dir(src:&Path,dst:&Path)->Result<(),String>{fs::create_dir_all(dst).map_err(|e|e.to_string())?;for e in fs::read_dir(src).map_err(|e|e.to_string())?{let e=e.map_err(|e|e.to_string())?;let to=dst.join(e.file_name());if e.file_type().map_err(|e|e.to_string())?.is_dir(){copy_dir(&e.path(),&to)?}else{fs::copy(e.path(),to).map_err(|e|e.to_string())?;}}Ok(())}
 
 fn open_settings(app:&AppHandle){if let Some(w)=app.get_webview_window("settings"){let _=w.show();let _=w.set_focus();return}let _=WebviewWindowBuilder::new(app,"settings",WebviewUrl::App("index.html?settings=1".into())).title("Pet Desk 设置").inner_size(760.0,640.0).resizable(true).build();}
-fn tray(app:&AppHandle){let show=MenuItem::with_id(app,"show","显示 / 隐藏",true,None::<&str>).unwrap();let click=CheckMenuItem::with_id(app,"click","鼠标穿透",true,true,None::<&str>).unwrap();let top=CheckMenuItem::with_id(app,"top","始终置顶",true,true,None::<&str>).unwrap();let drag=CheckMenuItem::with_id(app,"drag","允许拖动",true,true,None::<&str>).unwrap();let auto=CheckMenuItem::with_id(app,"auto","开机自启",true,true,None::<&str>).unwrap();let settings=MenuItem::with_id(app,"settings","打开设置",true,None::<&str>).unwrap();let reset=MenuItem::with_id(app,"reset","重置位置",true,None::<&str>).unwrap();let quit=MenuItem::with_id(app,"quit","退出",true,None::<&str>).unwrap();let menu=Menu::with_items(app,&[&show,&click,&top,&drag,&auto,&settings,&reset,&quit]).unwrap();let h=app.clone();TrayIconBuilder::new().menu(&menu).on_menu_event(move |_,e|{let id=e.id().as_ref();match id{"show"=>if let Some(w)=h.get_webview_window("pet"){if w.is_visible().unwrap_or(false){let _=w.hide()}else{let _=w.show()}},"settings"=>open_settings(&h),"reset"=>{let _=h.emit("reset-position",());},"quit"=>h.exit(0),"click"|"top"|"drag"|"auto"=>{let state=h.state::<AppState>();let mut s=state.settings.lock().unwrap().clone();match id{"click"=>s.click_through=!s.click_through,"top"=>s.always_on_top=!s.always_on_top,"drag"=>s.drag_enabled=!s.drag_enabled,_=>s.autostart=!s.autostart};drop(state);let _=save_settings(h.clone(),h.state(),s)},_=>{}}).build(app).unwrap();}
+fn tray(app: &AppHandle) {
+    let show = MenuItem::with_id(app, "show", "显示 / 隐藏", true, None::<&str>).unwrap();
+    let click = CheckMenuItem::with_id(app, "click", "鼠标穿透", true, true, None::<&str>).unwrap();
+    let top = CheckMenuItem::with_id(app, "top", "始终置顶", true, true, None::<&str>).unwrap();
+    let drag = CheckMenuItem::with_id(app, "drag", "允许拖动", true, true, None::<&str>).unwrap();
+    let auto = CheckMenuItem::with_id(app, "auto", "开机自启", true, true, None::<&str>).unwrap();
+    let settings = MenuItem::with_id(app, "settings", "打开设置", true, None::<&str>).unwrap();
+    let reset = MenuItem::with_id(app, "reset", "重置位置", true, None::<&str>).unwrap();
+    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>).unwrap();
+    let menu = Menu::with_items(app, &[&show, &click, &top, &drag, &auto, &settings, &reset, &quit]).unwrap();
+    let handle = app.clone();
+
+    TrayIconBuilder::new()
+        .menu(&menu)
+        .on_menu_event(move |_, event| {
+            let id = event.id().as_ref();
+            match id {
+                "show" => {
+                    if let Some(window) = handle.get_webview_window("pet") {
+                        if window.is_visible().unwrap_or(false) {
+                            let _ = window.hide();
+                        } else {
+                            let _ = window.show();
+                        }
+                    }
+                }
+                "settings" => open_settings(&handle),
+                "reset" => {
+                    let _ = handle.emit("reset-position", ());
+                }
+                "quit" => handle.exit(0),
+                "click" | "top" | "drag" | "auto" => {
+                    let state = handle.state::<AppState>();
+                    let mut settings = state.settings.lock().unwrap().clone();
+                    match id {
+                        "click" => settings.click_through = !settings.click_through,
+                        "top" => settings.always_on_top = !settings.always_on_top,
+                        "drag" => settings.drag_enabled = !settings.drag_enabled,
+                        _ => settings.autostart = !settings.autostart,
+                    }
+                    drop(state);
+                    let _ = save_settings(handle.clone(), handle.state(), settings);
+                }
+                _ => {}
+            }
+        })
+        .build(app)
+        .unwrap();
+}
 pub fn run(){tauri::Builder::default().plugin(tauri_plugin_dialog::init()).plugin(tauri_plugin_opener::init()).plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent,None)).setup(|app|{let s=read_settings(app.handle());app.manage(AppState{settings:Mutex::new(s.clone())});let _=fs::create_dir_all(pets_dir(app.handle()).unwrap());if s.autostart{let _=app.autolaunch().enable();}tray(app.handle());Ok(())}).invoke_handler(tauri::generate_handler![list_pets,get_settings,save_settings,pet_data_dir,delete_custom_pet,import_pet]).on_window_event(|w,e|if let tauri::WindowEvent::CloseRequested{api,..}=e{if w.label()=="pet"{api.prevent_close();let _=w.hide();}}).run(tauri::generate_context!()).expect("tauri failed")}
 
 #[cfg(test)] mod tests { use super::*; use std::io::Write;
