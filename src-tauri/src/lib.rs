@@ -470,6 +470,13 @@ pub fn run() {
             app.manage(AppState {
                 settings: Mutex::new(s.clone()),
             });
+            if let (Some(x), Some(y)) = (s.x, s.y) {
+                if let Some(window) = app.get_webview_window("pet") {
+                    let _ = window.set_position(tauri::Position::Physical(
+                        tauri::PhysicalPosition::new(x, y),
+                    ));
+                }
+            }
             let _ = fs::create_dir_all(pets_dir(app.handle()).unwrap());
             if s.autostart {
                 let _ = app.autolaunch().enable();
@@ -490,6 +497,21 @@ pub fn run() {
             quit_app
         ])
         .on_window_event(|w, e| match e {
+            tauri::WindowEvent::Moved(position) if w.label() == "pet" => {
+                let state = w.state::<AppState>();
+                let snapshot = {
+                    let mut settings = state.settings.lock().unwrap();
+                    if settings.x == Some(position.x) && settings.y == Some(position.y) {
+                        return;
+                    }
+                    settings.x = Some(position.x);
+                    settings.y = Some(position.y);
+                    settings.clone()
+                };
+                if let Err(error) = write_settings(w.app_handle(), &snapshot) {
+                    eprintln!("failed to save pet window position: {error}");
+                }
+            }
             tauri::WindowEvent::CloseRequested { api, .. } if w.label() == "pet" => {
                 api.prevent_close();
                 let _ = w.hide();
@@ -524,6 +546,8 @@ mod tests {
         assert!(s.input_animation_by_pet.is_empty());
         assert_eq!(s.scale, 1.5);
         assert!(!s.click_through);
+        assert_eq!(s.x, Some(10));
+        assert_eq!(s.y, Some(20));
     }
     #[test]
     fn input_animation_selection_persists_per_pet() {
