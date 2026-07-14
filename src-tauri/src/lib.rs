@@ -460,6 +460,15 @@ pub fn run() {
             app.manage(AppState {
                 settings: Mutex::new(s.clone()),
             });
+            if let Some(config) = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|config| config.label == "actions")
+            {
+                WebviewWindowBuilder::from_config(app.handle(), config)?.build()?;
+            }
             if let (Some(x), Some(y)) = (s.x, s.y) {
                 if let Some(window) = app.get_webview_window("pet") {
                     let _ = window.set_position(tauri::Position::Physical(
