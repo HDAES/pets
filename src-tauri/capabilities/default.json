@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Desktop pet permissions",
-  "windows": ["pet", "settings"],
+  "windows": ["pet", "settings", "actions"],
   "permissions": ["core:default", "core:window:allow-start-dragging", "core:window:allow-set-ignore-cursor-events", "core:window:allow-set-always-on-top", "core:window:allow-set-position", "core:window:allow-set-size", "core:window:allow-cursor-position", "dialog:default", "opener:default", "autostart:default"]
 }
