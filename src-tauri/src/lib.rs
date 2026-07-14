@@ -132,6 +132,6 @@ pub fn run(){tauri::Builder::default().plugin(tauri_plugin_dialog::init()).plugi
 
 #[cfg(test)] mod tests { use super::*; use std::io::Write;
  #[test] fn default_settings_match_product_defaults(){let s=Settings::default();assert!(s.click_through && s.always_on_top && s.drag_enabled && s.autostart);assert_eq!(s.current_pet_id,"ikunchick");}
- #[test] fn rejects_bad_manifest(){let d=std::env::temp_dir().join(format!("pet-test-{}",uuid::Uuid::new_v4()));fs::create_dir_all(&d).unwrap();fs::File::create(d.join("pet.json")).unwrap().write_all(br#"{"id":"bad id"}"#).unwrap();assert!(validate_package(&d).unwrap_err().contains("id"));let _=fs::remove_dir_all(d);}
+ #[test] fn rejects_bad_manifest(){let d=std::env::temp_dir().join(format!("pet-test-{}",uuid::Uuid::new_v4()));fs::create_dir_all(&d).unwrap();fs::File::create(d.join("pet.json")).unwrap().write_all(br#"{"id":"bad id","displayName":"Bad","description":"","spriteVersionNumber":2,"spritesheetPath":"spritesheet.webp","kind":"animal"}"#).unwrap();assert!(validate_package(&d).unwrap_err().contains("id"));let _=fs::remove_dir_all(d);}
  #[test] fn validates_sheet_size_and_alpha(){assert!(validate_sheet_properties((W,H),true).is_ok());assert!(validate_sheet_properties((1,H),true).unwrap_err().contains("尺寸"));assert!(validate_sheet_properties((W,H),false).unwrap_err().contains("透明"));}
 }

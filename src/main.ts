@@ -1,16 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow, LogicalPosition } from "@tauri-apps/api/window";
-import { listen } from "@tauri-apps/api/event";
+import { cursorPosition, getCurrentWindow, LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
+import { emitTo, listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import type { PetRecord, Settings, AnimationName } from "./lib/types";
 import { SpriteRenderer } from "./lib/renderer";
 import { AnimationStateMachine } from "./lib/animation";
 import { gazeDirection } from "./lib/gaze";
+import { SHEET } from "./lib/sprite";
 import "./style.css";
 
 const appWindow = getCurrentWindow();
 let settings: Settings, pets: PetRecord[] = [], renderer: SpriteRenderer, state = new AnimationStateMachine();
+let gazeFollowing = false;
 const canvas = document.createElement("canvas");
 document.querySelector("#app")!.append(canvas);
 
@@ -24,21 +26,108 @@ async function selectPet(id: string) {
 }
 async function applySettings(next: Partial<Settings>) {
   settings = { ...settings, ...next }; await api("save_settings", { settings });
-  await appWindow.setAlwaysOnTop(settings.alwaysOnTop); await appWindow.setIgnoreCursorEvents(settings.clickThrough);
+  await applyPetWindowSettings();
   reflectSettings();
+}
+async function applyPetWindowSettings() {
+  if (appWindow.label !== "pet") return;
+  await appWindow.setSize(new LogicalSize(SHEET.cellWidth * settings.scale, SHEET.cellHeight * settings.scale));
+  await appWindow.setAlwaysOnTop(settings.alwaysOnTop);
+  await appWindow.setIgnoreCursorEvents(settings.clickThrough);
 }
 function reflectSettings() { document.body.classList.toggle("interactive", !settings.clickThrough); }
 function animate(now: number) { state.tick(now); renderer.draw(state, settings.scale); requestAnimationFrame(animate); }
 function setState(name: AnimationName, direction = 0) { state.set(name, direction); }
-function setupGaze() {
-  window.addEventListener("mousemove", async e => {
-    if (settings.clickThrough) return;
-    const pos = await appWindow.outerPosition(); const scale = settings.scale;
-    const d = gazeDirection(e.screenX, e.screenY, pos.x + 96 * scale, pos.y + 104 * scale, 35 * scale);
-    setState(d === null ? "idle" : "gaze", d ?? 0);
+async function setupGaze() {
+  let isDragging = false;
+  let windowPosition = await appWindow.outerPosition();
+  let scaleFactor = await appWindow.scaleFactor();
+  let dragEndTimer: number | undefined;
+  let dragStartTimer: number | undefined;
+  let pendingDrag: { pointerId: number; startX: number; startY: number; currentX: number } | undefined;
+  let gazeLockedUntil = 0;
+  let gazePollRunning = false;
+
+  const finishDrag = () => {
+    if (!isDragging) return;
+    isDragging = false;
+    if (dragEndTimer !== undefined) window.clearTimeout(dragEndTimer);
+    dragEndTimer = undefined;
+    canvas.classList.remove("dragging");
+    gazeLockedUntil = performance.now() + 700;
+    setState("idle");
+  };
+  const scheduleDragEnd = () => {
+    if (dragEndTimer !== undefined) window.clearTimeout(dragEndTimer);
+    dragEndTimer = window.setTimeout(finishDrag, 220);
+  };
+  const cancelPendingDrag = () => {
+    if (dragStartTimer !== undefined) window.clearTimeout(dragStartTimer);
+    dragStartTimer = undefined;
+    pendingDrag = undefined;
+  };
+  const beginDrag = () => {
+    if (!pendingDrag || isDragging) return;
+    const { pointerId, currentX } = pendingDrag;
+    cancelPendingDrag();
+    if (canvas.hasPointerCapture(pointerId)) canvas.releasePointerCapture(pointerId);
+    isDragging = true;
+    canvas.classList.add("dragging");
+    setState(currentX < canvas.clientWidth / 2 ? "running-left" : "running-right");
+    scheduleDragEnd();
+    void appWindow.startDragging().catch(finishDrag);
+  };
+
+  await appWindow.onMoved(({ payload: position }) => {
+    const dx = position.x - windowPosition.x;
+    windowPosition = position;
+    if (!isDragging) return;
+    if (Math.abs(dx) >= 1) setState(dx < 0 ? "running-left" : "running-right");
+    scheduleDragEnd();
   });
-  canvas.addEventListener("pointerdown", async () => { if (settings.dragEnabled && !settings.clickThrough) await appWindow.startDragging(); });
-  canvas.addEventListener("pointerup", () => setState("idle"));
+  await appWindow.onScaleChanged(({ payload }) => { scaleFactor = payload.scaleFactor; });
+
+  const updateGaze = async () => {
+    if (!gazeFollowing || isDragging || gazePollRunning || performance.now() < gazeLockedUntil) return;
+    gazePollRunning = true;
+    try {
+      const cursor = await cursorPosition();
+      if (!gazeFollowing || isDragging || performance.now() < gazeLockedUntil) return;
+      const width = SHEET.cellWidth * settings.scale * scaleFactor;
+      const height = SHEET.cellHeight * settings.scale * scaleFactor;
+      const d = gazeDirection(cursor.x, cursor.y, windowPosition.x + width / 2, windowPosition.y + height / 2, 35 * settings.scale * scaleFactor);
+      setState(d === null ? "idle" : "gaze", d ?? 0);
+    } finally {
+      gazePollRunning = false;
+    }
+  };
+  window.setInterval(() => { void updateGaze(); }, 100);
+
+  canvas.addEventListener("pointerdown", event => {
+    if (!settings.dragEnabled || settings.clickThrough || event.button !== 0) return;
+    pendingDrag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, currentX: event.clientX };
+    canvas.setPointerCapture(event.pointerId);
+    dragStartTimer = window.setTimeout(beginDrag, 160);
+  });
+  canvas.addEventListener("pointermove", event => {
+    if (!pendingDrag || pendingDrag.pointerId !== event.pointerId) return;
+    pendingDrag.currentX = event.clientX;
+    if (Math.hypot(event.clientX - pendingDrag.startX, event.clientY - pendingDrag.startY) >= 4) beginDrag();
+  });
+  canvas.addEventListener("click", event => {
+    if (event.detail !== 1) return;
+    gazeFollowing = false;
+    setState("idle");
+  });
+  canvas.addEventListener("dblclick", event => {
+    event.preventDefault();
+    finishDrag();
+    gazeLockedUntil = 0;
+    gazeFollowing = true;
+    void updateGaze();
+  });
+  window.addEventListener("pointerup", () => { cancelPendingDrag(); finishDrag(); }, true);
+  window.addEventListener("pointercancel", () => { cancelPendingDrag(); finishDrag(); }, true);
 }
 function settingsPage() {
   const current = pets.find(p => p.manifest.id === settings.currentPetId);
@@ -52,13 +141,14 @@ function settingsPage() {
   const scale = document.querySelector<HTMLInputElement>("#scale")!; scale.oninput = () => { applySettings({ scale: Number(scale.value) }); document.querySelector("output")!.textContent = `${scale.value}×`; };
   document.querySelector("#import")!.addEventListener("click", async () => { const path = await open({ directory: true, multiple: false, title: "选择包含 pet.json 的宠物包文件夹" }); if (!path) return; try { await api("import_pet", { sourcePath: path, conflict: "ask" }); await refreshPets(); settingsPage(); } catch (e) { const message = String(e); if (!message.includes("ID_CONFLICT:")) { document.querySelector("#error")!.textContent = message; return; } const choice = window.prompt("宠物 ID 已存在。输入 overwrite 覆盖，rename 自动重命名，或 cancel 取消：", "rename"); if (choice === "overwrite" || choice === "rename") { try { await api("import_pet", { sourcePath: path, conflict: choice }); await refreshPets(); settingsPage(); } catch (inner) { document.querySelector("#error")!.textContent = String(inner); } } } });
   document.querySelector("#data")!.addEventListener("click", () => api<string>("pet_data_dir").then(openPath));
-  document.querySelector("#debug")?.append(...(["idle","running-right","running-left","waving","jumping","failed","waiting","running","review"] as AnimationName[]).map(n => { const b = document.createElement("button"); b.textContent = n; b.onclick = () => setState(n); return b; }), ...Array.from({length:16}, (_, d) => { const b=document.createElement("button"); b.textContent=`看 ${d*22.5}°`; b.onclick=()=>setState("gaze",d); return b; }));
+  const previewAnimation = (value: string) => { void emitTo("pet", "debug-animation", value); };
+  document.querySelector("#debug")?.append(...(["idle","running-right","running-left","waving","jumping","failed","waiting","running","review"] as AnimationName[]).map(n => { const b = document.createElement("button"); b.textContent = n; b.onclick = () => previewAnimation(n); return b; }), ...Array.from({length:16}, (_, d) => { const b=document.createElement("button"); b.textContent=`看 ${d*22.5}°`; b.onclick=()=>previewAnimation(`gaze:${d}`); return b; }));
 }
 function toggle(key: keyof Settings, label: string) { return `<label class="toggle">${label}<input type="checkbox" id="${key}" ${settings[key] ? "checked" : ""}></label>`; }
 async function main() {
-  settings = await api<Settings>("get_settings"); await refreshPets(); renderer = new SpriteRenderer(canvas); await selectPet(settings.currentPetId); await applySettings({}); if (new URLSearchParams(location.search).has("settings")) settingsPage(); else setupGaze();
-  await listen("settings-changed", event => { settings = event.payload as Settings; reflectSettings(); });
-  await listen("open-settings", settingsPage); await listen("reset-position", () => appWindow.setPosition(new LogicalPosition(100, 100))); await listen("debug-animation", e => { const value = e.payload as string; if (value.startsWith("gaze:")) setState("gaze", Number(value.slice(5))); else setState(value as AnimationName); });
+  settings = await api<Settings>("get_settings"); await refreshPets(); renderer = new SpriteRenderer(canvas); await selectPet(settings.currentPetId); await applySettings({}); if (new URLSearchParams(location.search).has("settings")) settingsPage(); else await setupGaze();
+  await listen("settings-changed", async event => { settings = event.payload as Settings; await applyPetWindowSettings(); reflectSettings(); });
+  await listen("open-settings", settingsPage); await listen("reset-position", () => appWindow.setPosition(new LogicalPosition(100, 100))); await listen("debug-animation", e => { gazeFollowing = false; const value = e.payload as string; if (value.startsWith("gaze:")) setState("gaze", Number(value.slice(5))); else setState(value as AnimationName); });
   requestAnimationFrame(animate);
 }
 main().catch(async error => {

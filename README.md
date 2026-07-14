@@ -1,10 +1,10 @@
 # Pet Desk
 
-通用、轻量的 Windows 桌面宠物。v1 内置 `ikunchick`，但运行时只依赖应用自身与系统 WebView2；不需要安装 Codex、Python 或 Node。
+通用、轻量的 Windows 与 macOS 桌面宠物。v1 内置 `ikunchick`，安装后的应用不需要 Codex、Python 或 Node。
 
 ## 开发
 
-需要 Node.js 22+、Rust stable、Windows WebView2。安装依赖后运行：
+需要 Node.js 22+ 和 Rust stable；Windows 还需要 WebView2。安装依赖后运行：
 
 ```bash
 npm install
@@ -25,13 +25,33 @@ npm run tauri build -- --bundles nsis
 
 安装包输出在 `src-tauri/target/release/bundle/nsis/`，为 `.exe`。NSIS 安装程序从“应用和功能”或卸载程序卸载。安装后请验证：启动、托盘显示/隐藏、穿透切换、拖动、重启位置恢复、导入/删除宠物及开机自启。
 
-每次推送到 `main`，或手动运行 GitHub Actions 时，工作流都会在 Windows runner 上运行前端测试并生成 NSIS `.exe`，可从该次 Actions 任务的 `Pet-Desk-Windows-NSIS` artifact 下载。标签不再触发额外构建或自动创建 Release。
+## macOS 打包与安装
+
+本地构建当前 Mac 架构的 DMG：
+
+```bash
+npm ci
+npm run tauri build -- --bundles dmg
+```
+
+DMG 位于 `src-tauri/target/release/bundle/dmg/`。打开后将 Pet Desk 拖入“应用程序”。未进行 Apple 签名和公证的开发构建首次运行时，可能需要在 Finder 中右键应用并选择“打开”。
+
+每次推送到 `main`、向 `main` 提交 Pull Request，或手动运行 GitHub Actions 时，Windows 与 macOS 会并行测试和打包：
+
+- `Pet-Desk-Windows-NSIS`：Windows x64 NSIS `.exe`。
+- `Pet-Desk-macOS-Universal-DMG`：同时支持 Apple Silicon 和 Intel Mac 的 Universal `.dmg`。
+
+两个 artifact 都保留 30 天。标签不触发额外构建，也不会自动创建 Release。
 
 ## 数据位置
 
 Windows 用户导入的宠物和 `settings.json` 位于：
 
 `%APPDATA%\\com.petdesk.app\\pets`
+
+macOS 用户数据位于：
+
+`~/Library/Application Support/com.petdesk.app/pets`
 
 内置 `ikunchick` 由安装资源提供，永远不会被删除；用户自定义宠物只复制到上述数据目录，原始目录不会被引用。
 
