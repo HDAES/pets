@@ -84,8 +84,15 @@ fn tray(app: &AppHandle) {
     let menu = Menu::with_items(app, &[&show, &click, &top, &drag, &auto, &settings, &reset, &quit]).unwrap();
     let handle = app.clone();
 
-    TrayIconBuilder::new()
+    let mut tray = TrayIconBuilder::new()
         .menu(&menu)
+        .tooltip("Pet Desk")
+        .title("Pet Desk");
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+
+    tray
         .on_menu_event(move |_, event| {
             let id = event.id().as_ref();
             match id {
