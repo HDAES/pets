@@ -198,7 +198,8 @@ function actionMenuPage() {
     ["review", "检查 Review", "✓"],
     ["failed", "失败", "!"],
   ];
-  document.body.innerHTML = `<aside class="action-menu"><header><span class="action-mark">✦</span><div><h1>动作面板</h1><p>选择动作 · 点击外部关闭</p></div></header><div id="actions"></div></aside>`;
+  document.body.className = "actions-page interactive";
+  document.body.innerHTML = `<aside class="action-menu"><header><span class="action-mark">✦</span><div><h1>动作面板</h1><p>选择动作 · 点击外部关闭</p></div></header><div id="actions"></div><footer><button id="close-panel" type="button">关闭面板</button><button id="quit-app" class="danger" type="button">退出桌宠</button></footer></aside>`;
   const list = document.querySelector("#actions")!;
   for (const [value, label, icon] of actions) {
     const button = document.createElement("button");
@@ -213,8 +214,11 @@ function actionMenuPage() {
     button.setAttribute("aria-pressed", "false");
     list.append(button);
   }
+  document.querySelector<HTMLButtonElement>("#close-panel")!.onclick = () => { void appWindow.close(); };
+  document.querySelector<HTMLButtonElement>("#quit-app")!.onclick = () => { void api("quit_app"); };
 }
 function settingsPage() {
+  document.body.className = "settings-page interactive";
   const current = pets.find(p => p.manifest.id === settings.currentPetId);
   const inputAnimation = inputAnimationForPet(settings.currentPetId);
   const inputAnimationOptions = INPUT_ANIMATIONS.map(([value, label]) => `<option value="${value}" ${value === inputAnimation ? "selected" : ""}>${label} · ${value}</option>`).join("");
@@ -237,8 +241,8 @@ function settingsPage() {
 function toggle(key: keyof Settings, label: string) { return `<label class="toggle">${label}<input type="checkbox" id="${key}" ${settings[key] ? "checked" : ""}></label>`; }
 async function main() {
   const params = new URLSearchParams(location.search);
-  if (params.has("actions")) { actionMenuPage(); return; }
-  settings = await api<Settings>("get_settings"); await refreshPets(); renderer = new SpriteRenderer(canvas); await loadPet(settings.currentPetId); await applySettings({}); if (params.has("settings")) settingsPage(); else await setupGaze();
+  if (appWindow.label === "actions" || params.has("actions")) { actionMenuPage(); return; }
+  settings = await api<Settings>("get_settings"); await refreshPets(); renderer = new SpriteRenderer(canvas); await loadPet(settings.currentPetId); await applySettings({}); if (appWindow.label === "settings" || params.has("settings")) settingsPage(); else await setupGaze();
   await listen("settings-changed", async event => { const previousPetId = settings.currentPetId; settings = event.payload as Settings; if (appWindow.label === "pet" && previousPetId !== settings.currentPetId) await loadPet(settings.currentPetId); if (appWindow.label === "pet" && !settings.inputListeningEnabled && inputAnimationActive) { stopInputAnimation(); setState("idle"); } else if (appWindow.label === "pet" && inputAnimationActive) { setState(inputAnimationForPet(settings.currentPetId)); } await applyPetWindowSettings(); reflectSettings(); });
   await listen("pet-action", event => { const value = event.payload as string; stopInputAnimation(); if (value === "follow") { manualActionActive = false; gazeFollowing = true; updateGazeNow(); } else { manualActionActive = value !== "idle"; gazeFollowing = false; setState(value as AnimationName); } });
   if (appWindow.label === "pet") await listen("global-key-activity", handleGlobalKeyActivity);

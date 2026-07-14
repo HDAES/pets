@@ -338,15 +338,11 @@ fn open_settings(app: &AppHandle) {
         let _ = w.set_focus();
         return;
     }
-    let _ = WebviewWindowBuilder::new(
-        app,
-        "settings",
-        WebviewUrl::App("index.html?settings=1".into()),
-    )
-    .title("Pet Desk 设置")
-    .inner_size(760.0, 640.0)
-    .resizable(true)
-    .build();
+    let _ = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
+        .title("Pet Desk 设置")
+        .inner_size(760.0, 640.0)
+        .resizable(true)
+        .build();
 }
 #[tauri::command]
 fn open_action_menu(app: AppHandle) -> Result<(), String> {
@@ -364,21 +360,21 @@ fn open_action_menu(app: AppHandle) -> Result<(), String> {
         window.set_focus().map_err(|e| e.to_string())?;
         return Ok(());
     }
-    WebviewWindowBuilder::new(
-        &app,
-        "actions",
-        WebviewUrl::App("index.html?actions=1".into()),
-    )
-    .title("Pet Desk 动作")
-    .position(x, y)
-    .inner_size(276.0, 390.0)
-    .decorations(false)
-    .resizable(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .build()
-    .map_err(|e| e.to_string())?;
+    WebviewWindowBuilder::new(&app, "actions", WebviewUrl::App("index.html".into()))
+        .title("Pet Desk 动作")
+        .position(x, y)
+        .inner_size(276.0, 450.0)
+        .decorations(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .build()
+        .map_err(|e| e.to_string())?;
     Ok(())
+}
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
 }
 fn tray(app: &AppHandle) {
     let show = MenuItem::with_id(app, "show", "显示 / 隐藏", true, None::<&str>).unwrap();
@@ -490,7 +486,8 @@ pub fn run() {
             pet_data_dir,
             delete_custom_pet,
             import_pet,
-            open_action_menu
+            open_action_menu,
+            quit_app
         ])
         .on_window_event(|w, e| match e {
             tauri::WindowEvent::CloseRequested { api, .. } if w.label() == "pet" => {
