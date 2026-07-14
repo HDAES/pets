@@ -1,0 +1,8 @@
+{
+  "id": "ikunchick",
+  "displayName": "ikunchick",
+  "description": "A tiny basketball chick desktop pet.",
+  "spriteVersionNumber": 2,
+  "spritesheetPath": "spritesheet.webp",
+  "kind": "animal"
+}
