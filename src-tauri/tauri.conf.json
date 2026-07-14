@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Pet Desk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.petdesk.app",
   "build": { "beforeDevCommand": "npm run dev", "beforeBuildCommand": "npm run build", "devUrl": "http://localhost:1420", "frontendDist": "../dist" },
-  "app": { "windows": [{ "label": "pet", "title": "Pet Desk", "width": 192, "height": 208, "transparent": true, "decorations": false, "alwaysOnTop": true, "skipTaskbar": true, "resizable": false, "shadow": false, "visible": true }], "security": { "csp": null, "assetProtocol": { "enable": true, "scope": ["$RESOURCE/pets/**", "$APPDATA/com.petdesk.app/pets/**"] } } },
+  "app": { "windows": [{ "label": "pet", "title": "Pet Desk", "width": 192, "height": 208, "transparent": true, "decorations": false, "alwaysOnTop": true, "skipTaskbar": true, "resizable": false, "shadow": false, "visible": true }], "security": { "csp": null } },
   "bundle": { "active": true, "targets": ["nsis"], "resources": { "resources/builtin/*": "pets/ikunchick/" }, "windows": { "nsis": { "installMode": "currentUser", "displayLanguageSelector": true } } }
 }

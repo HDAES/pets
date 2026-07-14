@@ -1,4 +1,4 @@
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalPosition } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -19,7 +19,8 @@ async function refreshPets() { pets = await api<PetRecord[]>("list_pets"); }
 async function selectPet(id: string) {
   const pet = pets.find(p => p.manifest.id === id); if (!pet) return;
   settings.currentPetId = id; await api("save_settings", { settings });
-  await renderer.load(convertFileSrc(`${pet.path}/${pet.manifest.spritesheetPath}`));
+  const bytes = await api<ArrayBuffer>("pet_spritesheet", { id });
+  await renderer.load(bytes);
 }
 async function applySettings(next: Partial<Settings>) {
   settings = { ...settings, ...next }; await api("save_settings", { settings });
