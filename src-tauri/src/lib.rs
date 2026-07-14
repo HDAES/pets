@@ -352,24 +352,14 @@ fn open_action_menu(app: AppHandle) -> Result<(), String> {
     let factor = pet.scale_factor().map_err(|e| e.to_string())?;
     let x = (position.x as f64 + size.width as f64) / factor + 8.0;
     let y = position.y as f64 / factor;
-    if let Some(window) = app.get_webview_window("actions") {
-        window
-            .set_position(tauri::Position::Logical(tauri::LogicalPosition::new(x, y)))
-            .map_err(|e| e.to_string())?;
-        window.show().map_err(|e| e.to_string())?;
-        window.set_focus().map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    WebviewWindowBuilder::new(&app, "actions", WebviewUrl::App("index.html".into()))
-        .title("Pet Desk 动作")
-        .position(x, y)
-        .inner_size(276.0, 450.0)
-        .decorations(false)
-        .resizable(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .build()
+    let window = app
+        .get_webview_window("actions")
+        .ok_or("动作窗口尚未初始化")?;
+    window
+        .set_position(tauri::Position::Logical(tauri::LogicalPosition::new(x, y)))
         .map_err(|e| e.to_string())?;
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())?;
     Ok(())
 }
 #[tauri::command]
@@ -512,12 +502,11 @@ pub fn run() {
                     eprintln!("failed to save pet window position: {error}");
                 }
             }
-            tauri::WindowEvent::CloseRequested { api, .. } if w.label() == "pet" => {
-                api.prevent_close();
-                let _ = w.hide();
+            tauri::WindowEvent::CloseRequested { .. } if w.label() == "pet" => {
+                w.app_handle().exit(0);
             }
             tauri::WindowEvent::Focused(false) if w.label() == "actions" => {
-                let _ = w.close();
+                let _ = w.hide();
             }
             _ => {}
         })

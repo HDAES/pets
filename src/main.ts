@@ -214,7 +214,7 @@ function actionMenuPage() {
     button.setAttribute("aria-pressed", "false");
     list.append(button);
   }
-  document.querySelector<HTMLButtonElement>("#close-panel")!.onclick = () => { void appWindow.close(); };
+  document.querySelector<HTMLButtonElement>("#close-panel")!.onclick = () => { void appWindow.hide(); };
   document.querySelector<HTMLButtonElement>("#quit-app")!.onclick = () => { void api("quit_app"); };
 }
 function settingsPage() {
