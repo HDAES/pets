@@ -1,6 +1,6 @@
 [package]
 name = "pet-desk"
-version = "0.1.7"
+version = "0.1.8"
 description = "A lightweight extensible desktop pet"
 edition = "2021"
 
