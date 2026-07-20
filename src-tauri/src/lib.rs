@@ -1,7 +1,7 @@
 use image::GenericImageView;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -51,6 +51,12 @@ pub struct Settings {
     always_on_top: bool,
     drag_enabled: bool,
     autostart: bool,
+    #[serde(default = "default_ai_provider")]
+    ai_provider: String,
+    #[serde(default = "default_ai_base_url")]
+    ai_base_url: String,
+    #[serde(default = "default_ai_model")]
+    ai_model: String,
     x: Option<i32>,
     y: Option<i32>,
 }
@@ -59,6 +65,15 @@ fn default_animation_speed() -> f64 {
 }
 fn default_input_listening_enabled() -> bool {
     true
+}
+fn default_ai_provider() -> String {
+    "openai-compatible".into()
+}
+fn default_ai_base_url() -> String {
+    "https://api.deepseek.com".into()
+}
+fn default_ai_model() -> String {
+    "deepseek-v4-flash".into()
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -72,13 +87,44 @@ impl Default for Settings {
             always_on_top: true,
             drag_enabled: true,
             autostart: true,
+            ai_provider: default_ai_provider(),
+            ai_base_url: default_ai_base_url(),
+            ai_model: default_ai_model(),
             x: None,
             y: None,
         }
     }
 }
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiServiceConfig {
+    provider: String,
+    base_url: String,
+    model: String,
+    has_api_key: bool,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiServiceConfigInput {
+    provider: String,
+    base_url: String,
+    model: String,
+}
 pub struct AppState {
     settings: Mutex<Settings>,
+    cancelled_chat_requests: Mutex<HashSet<String>>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    role: String,
+    content: String,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatDelta {
+    request_id: String,
+    delta: String,
 }
 
 fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -97,11 +143,49 @@ fn write_settings(app: &AppHandle, s: &Settings) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 fn read_settings(app: &AppHandle) -> Settings {
-    config_path(app)
+    let mut settings: Settings = config_path(app)
         .ok()
         .and_then(|p| fs::read(p).ok())
         .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if settings.ai_base_url == "https://api.openai.com/v1" && settings.ai_model.trim().is_empty() {
+        settings.ai_base_url = default_ai_base_url();
+        settings.ai_model = default_ai_model();
+    }
+    settings
+}
+
+const KEYRING_SERVICE: &str = "com.petdesk.app";
+const KEYRING_AI_API_KEY: &str = "ai-api-key";
+
+fn ai_api_key_entry() -> Result<keyring::Entry, String> {
+    keyring::Entry::new(KEYRING_SERVICE, KEYRING_AI_API_KEY)
+        .map_err(|e| format!("无法访问系统凭据存储：{e}"))
+}
+fn has_ai_api_key() -> Result<bool, String> {
+    match ai_api_key_entry()?.get_password() {
+        Ok(value) => Ok(!value.is_empty()),
+        Err(keyring::Error::NoEntry) => Ok(false),
+        Err(e) => Err(format!("无法读取 API Key 状态：{e}")),
+    }
+}
+fn validate_ai_service_config(config: &AiServiceConfigInput) -> Result<(), String> {
+    if config.provider != "openai-compatible" {
+        return Err("当前仅支持 OpenAI 兼容接口".into());
+    }
+    if config.model.trim().is_empty() || config.model.trim().len() > 120 {
+        return Err("模型名称不能为空且不能超过 120 个字符".into());
+    }
+    let url = url::Url::parse(config.base_url.trim()).map_err(|_| "API 地址格式无效")?;
+    let local_http =
+        url.scheme() == "http" && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    if url.scheme() != "https" && !local_http {
+        return Err("API 地址必须使用 HTTPS；本机 localhost 服务可以使用 HTTP".into());
+    }
+    if url.host_str().is_none() {
+        return Err("API 地址必须包含主机名".into());
+    }
+    Ok(())
 }
 fn builtin_manifest() -> Result<PetManifest, String> {
     serde_json::from_str(BUILTIN_MANIFEST).map_err(|e| format!("内置宠物 manifest 无效：{e}"))
@@ -230,6 +314,23 @@ fn get_settings(state: tauri::State<AppState>) -> Settings {
     state.settings.lock().unwrap().clone()
 }
 #[tauri::command]
+fn get_ai_service_config(state: tauri::State<AppState>) -> Result<AiServiceConfig, String> {
+    let (provider, base_url, model) = {
+        let settings = state.settings.lock().unwrap();
+        (
+            settings.ai_provider.clone(),
+            settings.ai_base_url.clone(),
+            settings.ai_model.clone(),
+        )
+    };
+    Ok(AiServiceConfig {
+        provider,
+        base_url,
+        model,
+        has_api_key: has_ai_api_key()?,
+    })
+}
+#[tauri::command]
 fn save_settings(
     app: AppHandle,
     state: tauri::State<AppState>,
@@ -271,6 +372,187 @@ fn save_settings(
     *state.settings.lock().unwrap() = settings.clone();
     let _ = app.emit("settings-changed", &settings);
     Ok(())
+}
+#[tauri::command]
+fn save_ai_service_config(
+    app: AppHandle,
+    state: tauri::State<AppState>,
+    config: AiServiceConfigInput,
+    api_key: Option<String>,
+) -> Result<AiServiceConfig, String> {
+    validate_ai_service_config(&config)?;
+    if let Some(api_key) = api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        if api_key.len() > 4096 {
+            return Err("API Key 长度不能超过 4096 个字符".into());
+        }
+        ai_api_key_entry()?
+            .set_password(api_key)
+            .map_err(|e| format!("无法将 API Key 写入系统凭据存储：{e}"))?;
+    }
+    let mut settings = state.settings.lock().unwrap().clone();
+    settings.ai_provider = config.provider;
+    settings.ai_base_url = config.base_url.trim().trim_end_matches('/').into();
+    settings.ai_model = config.model.trim().into();
+    save_settings(app.clone(), state, settings.clone())?;
+    let _ = app.emit("ai-config-changed", ());
+    Ok(AiServiceConfig {
+        provider: settings.ai_provider,
+        base_url: settings.ai_base_url,
+        model: settings.ai_model,
+        has_api_key: has_ai_api_key()?,
+    })
+}
+#[tauri::command]
+fn delete_ai_api_key(app: AppHandle) -> Result<(), String> {
+    match ai_api_key_entry()?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => {
+            let _ = app.emit("ai-config-changed", ());
+            Ok(())
+        }
+        Err(e) => Err(format!("无法从系统凭据存储删除 API Key：{e}")),
+    }
+}
+fn get_ai_api_key() -> Result<String, String> {
+    match ai_api_key_entry()?.get_password() {
+        Ok(value) if !value.trim().is_empty() => Ok(value),
+        Ok(_) | Err(keyring::Error::NoEntry) => Err("尚未配置 API Key".into()),
+        Err(e) => Err(format!("无法从系统凭据存储读取 API Key：{e}")),
+    }
+}
+
+fn parse_chat_sse_event(event: &str) -> Result<(Vec<String>, bool), String> {
+    let mut deltas = Vec::new();
+    for line in event.lines() {
+        let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+            continue;
+        };
+        if data == "[DONE]" {
+            return Ok((deltas, true));
+        }
+        if data.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(data).map_err(|_| "AI 服务返回了无法解析的流数据")?;
+        if let Some(delta) = value
+            .pointer("/choices/0/delta/content")
+            .and_then(|value| value.as_str())
+            .filter(|delta| !delta.is_empty())
+        {
+            deltas.push(delta.to_owned());
+        }
+    }
+    Ok((deltas, false))
+}
+
+#[tauri::command]
+fn cancel_chat_request(state: tauri::State<AppState>, request_id: String) {
+    state
+        .cancelled_chat_requests
+        .lock()
+        .unwrap()
+        .insert(request_id);
+}
+
+#[tauri::command]
+async fn send_chat_message(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    request_id: String,
+    messages: Vec<ChatMessage>,
+) -> Result<(), String> {
+    if messages.is_empty() || messages.len() > 40 {
+        return Err("聊天上下文必须包含 1–40 条消息".into());
+    }
+    if messages.iter().any(|message| {
+        !matches!(message.role.as_str(), "user" | "assistant")
+            || message.content.trim().is_empty()
+            || message.content.chars().count() > 20_000
+    }) {
+        return Err("聊天消息格式无效或内容过长".into());
+    }
+    state
+        .cancelled_chat_requests
+        .lock()
+        .unwrap()
+        .remove(&request_id);
+    let (base_url, model) = {
+        let settings = state.settings.lock().unwrap();
+        (settings.ai_base_url.clone(), settings.ai_model.clone())
+    };
+    let api_key = get_ai_api_key()?;
+    let mut api_messages = vec![ChatMessage {
+        role: "system".into(),
+        content: "你是一只友好、自然、简洁的桌面宠物。使用用户的语言回答，不要声称能读取未提供的屏幕、文件或键盘内容。".into(),
+    }];
+    api_messages.extend(messages);
+    let endpoint = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let result: Result<(), String> = async {
+        let response = reqwest::Client::new()
+            .post(endpoint)
+            .bearer_auth(api_key)
+            .json(&serde_json::json!({
+                "model": model,
+                "messages": api_messages,
+                "stream": true,
+                "thinking": { "type": "disabled" }
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("无法连接 AI 服务：{e}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            let detail: String = body.chars().take(500).collect();
+            return Err(format!("AI 服务返回 {status}：{detail}"));
+        }
+        use futures_util::StreamExt;
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        while let Some(chunk) = stream.next().await {
+            if state
+                .cancelled_chat_requests
+                .lock()
+                .unwrap()
+                .contains(&request_id)
+            {
+                return Ok(());
+            }
+            let chunk = chunk.map_err(|e| format!("读取 AI 回复失败：{e}"))?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            buffer = buffer.replace("\r\n", "\n");
+            while let Some(end) = buffer.find("\n\n") {
+                let event = buffer[..end].to_owned();
+                buffer.drain(..end + 2);
+                let (deltas, done) = parse_chat_sse_event(&event)?;
+                for delta in deltas {
+                    let _ = app.emit_to(
+                        "chat",
+                        "chat-stream-delta",
+                        ChatDelta {
+                            request_id: request_id.clone(),
+                            delta,
+                        },
+                    );
+                }
+                if done {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+    state
+        .cancelled_chat_requests
+        .lock()
+        .unwrap()
+        .remove(&request_id);
+    result
 }
 #[tauri::command]
 fn pet_data_dir(app: AppHandle) -> Result<String, String> {
@@ -344,23 +626,110 @@ fn open_settings(app: &AppHandle) {
         .resizable(true)
         .build();
 }
+
+fn anchored_panel_position(
+    pet_x: i32,
+    pet_y: i32,
+    pet_width: u32,
+    panel_width: u32,
+    panel_height: u32,
+    monitor_x: i32,
+    monitor_y: i32,
+    monitor_width: u32,
+    monitor_height: u32,
+    gap: i32,
+) -> (i32, i32) {
+    let monitor_right = monitor_x.saturating_add_unsigned(monitor_width);
+    let monitor_bottom = monitor_y.saturating_add_unsigned(monitor_height);
+    let mut x = pet_x.saturating_add_unsigned(pet_width).saturating_add(gap);
+    if x.saturating_add_unsigned(panel_width) > monitor_right {
+        x = pet_x
+            .saturating_sub_unsigned(panel_width)
+            .saturating_sub(gap);
+    }
+    let max_x = monitor_right.saturating_sub_unsigned(panel_width);
+    let max_y = monitor_bottom.saturating_sub_unsigned(panel_height);
+    (
+        x.clamp(monitor_x, max_x.max(monitor_x)),
+        pet_y.clamp(monitor_y, max_y.max(monitor_y)),
+    )
+}
+
+fn position_panel_beside_pet(app: &AppHandle, label: &str, activate: bool) -> Result<(), String> {
+    let pet = app.get_webview_window("pet").ok_or("找不到桌宠窗口")?;
+    let panel = app
+        .get_webview_window(label)
+        .ok_or_else(|| format!("{label} 窗口尚未初始化"))?;
+    let pet_position = pet.outer_position().map_err(|e| e.to_string())?;
+    let pet_size = pet.outer_size().map_err(|e| e.to_string())?;
+    let panel_size = panel.outer_size().map_err(|e| e.to_string())?;
+    let monitor = pet
+        .current_monitor()
+        .map_err(|e| e.to_string())?
+        .ok_or("找不到桌宠所在的显示器")?;
+    let monitor_position = monitor.position();
+    let monitor_size = monitor.size();
+    let gap = (10.0 * pet.scale_factor().map_err(|e| e.to_string())?).round() as i32;
+    let (x, y) = anchored_panel_position(
+        pet_position.x,
+        pet_position.y,
+        pet_size.width,
+        panel_size.width,
+        panel_size.height,
+        monitor_position.x,
+        monitor_position.y,
+        monitor_size.width,
+        monitor_size.height,
+        gap,
+    );
+    panel
+        .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+            x, y,
+        )))
+        .map_err(|e| e.to_string())?;
+    if activate {
+        panel.show().map_err(|e| e.to_string())?;
+        panel.set_focus().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn open_action_menu(app: AppHandle) -> Result<(), String> {
-    let pet = app.get_webview_window("pet").ok_or("找不到桌宠窗口")?;
-    let position = pet.outer_position().map_err(|e| e.to_string())?;
-    let size = pet.outer_size().map_err(|e| e.to_string())?;
-    let factor = pet.scale_factor().map_err(|e| e.to_string())?;
-    let x = (position.x as f64 + size.width as f64) / factor + 8.0;
-    let y = position.y as f64 / factor;
-    let window = app
-        .get_webview_window("actions")
-        .ok_or("动作窗口尚未初始化")?;
-    window
-        .set_position(tauri::Position::Logical(tauri::LogicalPosition::new(x, y)))
-        .map_err(|e| e.to_string())?;
-    window.show().map_err(|e| e.to_string())?;
-    window.set_focus().map_err(|e| e.to_string())?;
-    Ok(())
+    position_panel_beside_pet(&app, "actions", true)
+}
+#[tauri::command]
+fn open_chat(app: AppHandle) -> Result<(), String> {
+    position_panel_beside_pet(&app, "chat", true)
+}
+#[tauri::command]
+fn hide_chat(app: AppHandle) -> Result<(), String> {
+    app.get_webview_window("chat")
+        .ok_or("聊天窗口尚未初始化")?
+        .hide()
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn suspend_chat_for_pet_drag(app: AppHandle) -> Result<bool, String> {
+    let chat = app.get_webview_window("chat").ok_or("聊天窗口尚未初始化")?;
+    let was_visible = chat.is_visible().map_err(|e| e.to_string())?;
+    if was_visible {
+        chat.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(was_visible)
+}
+#[tauri::command]
+fn restore_chat_after_pet_drag(app: AppHandle) -> Result<(), String> {
+    position_panel_beside_pet(&app, "chat", true)
+}
+#[tauri::command]
+fn toggle_chat(app: AppHandle) -> Result<(), String> {
+    let chat = app.get_webview_window("chat").ok_or("聊天窗口尚未初始化")?;
+    if chat.is_visible().map_err(|e| e.to_string())? {
+        chat.hide().map_err(|e| e.to_string())
+    } else {
+        position_panel_beside_pet(&app, "chat", true)
+    }
 }
 #[tauri::command]
 fn quit_app(app: AppHandle) {
@@ -368,6 +737,8 @@ fn quit_app(app: AppHandle) {
 }
 fn tray(app: &AppHandle) {
     let show = MenuItem::with_id(app, "show", "显示 / 隐藏", true, None::<&str>).unwrap();
+    let chat = MenuItem::with_id(app, "chat", "和宠物聊天", true, None::<&str>).unwrap();
+    let actions = MenuItem::with_id(app, "actions", "打开动作面板", true, None::<&str>).unwrap();
     let click = CheckMenuItem::with_id(app, "click", "鼠标穿透", true, true, None::<&str>).unwrap();
     let top = CheckMenuItem::with_id(app, "top", "始终置顶", true, true, None::<&str>).unwrap();
     let drag = CheckMenuItem::with_id(app, "drag", "允许拖动", true, true, None::<&str>).unwrap();
@@ -377,7 +748,9 @@ fn tray(app: &AppHandle) {
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>).unwrap();
     let menu = Menu::with_items(
         app,
-        &[&show, &click, &top, &drag, &auto, &settings, &reset, &quit],
+        &[
+            &chat, &actions, &show, &click, &top, &drag, &auto, &settings, &reset, &quit,
+        ],
     )
     .unwrap();
     let handle = app.clone();
@@ -393,6 +766,18 @@ fn tray(app: &AppHandle) {
     tray.on_menu_event(move |_, event| {
         let id = event.id().as_ref();
         match id {
+            "chat" => {
+                if let Some(window) = handle.get_webview_window("pet") {
+                    let _ = window.show();
+                }
+                let _ = position_panel_beside_pet(&handle, "chat", true);
+            }
+            "actions" => {
+                if let Some(window) = handle.get_webview_window("pet") {
+                    let _ = window.show();
+                }
+                let _ = position_panel_beside_pet(&handle, "actions", true);
+            }
             "show" => {
                 if let Some(window) = handle.get_webview_window("pet") {
                     if window.is_visible().unwrap_or(false) {
@@ -425,6 +810,40 @@ fn tray(app: &AppHandle) {
     .build(app)
     .unwrap();
 }
+#[cfg(target_os = "macos")]
+fn start_global_input_listener(app: AppHandle) {
+    std::thread::spawn(move || {
+        use core_foundation::runloop::CFRunLoop;
+        use core_graphics::event::{
+            CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
+            CallbackResult,
+        };
+        let result = CGEventTap::with_enabled(
+            CGEventTapLocation::HID,
+            CGEventTapPlacement::HeadInsertEventTap,
+            CGEventTapOptions::ListenOnly,
+            vec![CGEventType::KeyDown],
+            move |_, _, _| {
+                let enabled = app
+                    .state::<AppState>()
+                    .settings
+                    .lock()
+                    .map(|settings| settings.input_listening_enabled)
+                    .unwrap_or(false);
+                if enabled {
+                    let _ = app.emit("global-key-activity", ());
+                }
+                CallbackResult::Keep
+            },
+            CFRunLoop::run_current,
+        );
+        if result.is_err() {
+            eprintln!("global keyboard listener could not start; allow Input Monitoring access");
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
 fn start_global_input_listener(app: AppHandle) {
     std::thread::spawn(move || {
         let callback = move |event: rdev::Event| {
@@ -459,13 +878,14 @@ pub fn run() {
             let s = read_settings(app.handle());
             app.manage(AppState {
                 settings: Mutex::new(s.clone()),
+                cancelled_chat_requests: Mutex::new(HashSet::new()),
             });
-            if let Some(config) = app
+            for config in app
                 .config()
                 .app
                 .windows
                 .iter()
-                .find(|config| config.label == "actions")
+                .filter(|config| matches!(config.label.as_str(), "actions" | "chat"))
             {
                 WebviewWindowBuilder::from_config(app.handle(), config)?.build()?;
             }
@@ -488,11 +908,21 @@ pub fn run() {
             list_pets,
             pet_spritesheet,
             get_settings,
+            get_ai_service_config,
             save_settings,
+            save_ai_service_config,
+            delete_ai_api_key,
+            send_chat_message,
+            cancel_chat_request,
             pet_data_dir,
             delete_custom_pet,
             import_pet,
             open_action_menu,
+            open_chat,
+            hide_chat,
+            suspend_chat_for_pet_drag,
+            restore_chat_after_pet_drag,
+            toggle_chat,
             quit_app
         ])
         .on_window_event(|w, e| match e {
@@ -510,9 +940,22 @@ pub fn run() {
                 if let Err(error) = write_settings(w.app_handle(), &snapshot) {
                     eprintln!("failed to save pet window position: {error}");
                 }
+                for label in ["chat", "actions"] {
+                    if w.app_handle()
+                        .get_webview_window(label)
+                        .and_then(|panel| panel.is_visible().ok())
+                        .unwrap_or(false)
+                    {
+                        let _ = position_panel_beside_pet(w.app_handle(), label, false);
+                    }
+                }
             }
             tauri::WindowEvent::CloseRequested { .. } if w.label() == "pet" => {
                 w.app_handle().exit(0);
+            }
+            tauri::WindowEvent::CloseRequested { api, .. } if w.label() == "chat" => {
+                api.prevent_close();
+                let _ = w.hide();
             }
             tauri::WindowEvent::Focused(false) if w.label() == "actions" => {
                 let _ = w.hide();
@@ -535,6 +978,9 @@ mod tests {
         assert_eq!(s.animation_speed, 1.0);
         assert!(s.input_listening_enabled);
         assert!(s.input_animation_by_pet.is_empty());
+        assert_eq!(s.ai_provider, "openai-compatible");
+        assert_eq!(s.ai_base_url, "https://api.deepseek.com");
+        assert_eq!(s.ai_model, "deepseek-v4-flash");
     }
     #[test]
     fn old_settings_default_animation_speed() {
@@ -542,6 +988,9 @@ mod tests {
         assert_eq!(s.animation_speed, 1.0);
         assert!(s.input_listening_enabled);
         assert!(s.input_animation_by_pet.is_empty());
+        assert_eq!(s.ai_provider, "openai-compatible");
+        assert_eq!(s.ai_base_url, "https://api.deepseek.com");
+        assert_eq!(s.ai_model, "deepseek-v4-flash");
         assert_eq!(s.scale, 1.5);
         assert!(!s.click_through);
         assert_eq!(s.x, Some(10));
@@ -560,6 +1009,60 @@ mod tests {
             serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
         assert_eq!(restored.input_animation_by_pet["ikunchick"], "waving");
         assert_eq!(restored.input_animation_by_pet["another-pet"], "review");
+    }
+    #[test]
+    fn panel_position_prefers_right_then_flips_left_at_screen_edge() {
+        assert_eq!(
+            anchored_panel_position(100, 100, 192, 380, 520, 0, 0, 1440, 900, 10),
+            (302, 100)
+        );
+        assert_eq!(
+            anchored_panel_position(1200, 500, 192, 380, 520, 0, 0, 1440, 900, 10),
+            (810, 380)
+        );
+    }
+    #[test]
+    fn validates_ai_service_configuration() {
+        let valid = AiServiceConfigInput {
+            provider: "openai-compatible".into(),
+            base_url: "https://api.example.com/v1".into(),
+            model: "example-model".into(),
+        };
+        assert!(validate_ai_service_config(&valid).is_ok());
+        let local = AiServiceConfigInput {
+            base_url: "http://localhost:11434/v1".into(),
+            ..valid
+        };
+        assert!(validate_ai_service_config(&local).is_ok());
+        let insecure_remote = AiServiceConfigInput {
+            base_url: "http://api.example.com/v1".into(),
+            ..local
+        };
+        assert!(validate_ai_service_config(&insecure_remote)
+            .unwrap_err()
+            .contains("HTTPS"));
+        let missing_model = AiServiceConfigInput {
+            model: " ".into(),
+            ..insecure_remote
+        };
+        assert!(validate_ai_service_config(&missing_model)
+            .unwrap_err()
+            .contains("模型"));
+    }
+    #[test]
+    fn parses_streaming_chat_events_and_keep_alive_comments() {
+        let event = concat!(
+            ": keep-alive\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"你\"}}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"好\"}}]}\n"
+        );
+        let (deltas, done) = parse_chat_sse_event(event).unwrap();
+        assert_eq!(deltas, ["你", "好"]);
+        assert!(!done);
+
+        let (deltas, done) = parse_chat_sse_event("data: [DONE]\n").unwrap();
+        assert!(deltas.is_empty());
+        assert!(done);
     }
     #[test]
     fn rejects_bad_manifest() {

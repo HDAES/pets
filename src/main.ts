@@ -3,7 +3,7 @@ import { cursorPosition, getCurrentWindow, LogicalPosition, LogicalSize } from "
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import type { PetRecord, Settings, AnimationName } from "./lib/types";
+import type { PetRecord, Settings, AnimationName, AiServiceConfig } from "./lib/types";
 import { SpriteRenderer } from "./lib/renderer";
 import { AnimationStateMachine } from "./lib/animation";
 import { gazeDirection } from "./lib/gaze";
@@ -94,6 +94,7 @@ async function setupGaze() {
   let pendingDrag: { pointerId: number; startX: number; startY: number; currentX: number } | undefined;
   let gazeLockedUntil = 0;
   let gazePollRunning = false;
+  let restoreChatAfterDrag = false;
 
   const finishDrag = () => {
     if (!isDragging) return;
@@ -104,6 +105,10 @@ async function setupGaze() {
     canvas.classList.remove("dragging");
     gazeLockedUntil = performance.now() + 700;
     setState("idle");
+    if (restoreChatAfterDrag) {
+      restoreChatAfterDrag = false;
+      void api("restore_chat_after_pet_drag");
+    }
   };
   const scheduleDragEnd = () => {
     if (dragEndTimer !== undefined) window.clearTimeout(dragEndTimer);
@@ -114,7 +119,7 @@ async function setupGaze() {
     dragStartTimer = undefined;
     pendingDrag = undefined;
   };
-  const beginDrag = () => {
+  const beginDrag = async () => {
     if (!pendingDrag || isDragging) return;
     const { pointerId, currentX } = pendingDrag;
     cancelPendingDrag();
@@ -125,6 +130,12 @@ async function setupGaze() {
     canvas.classList.add("dragging");
     setState(currentX < canvas.clientWidth / 2 ? "running-left" : "running-right");
     scheduleDragEnd();
+    const chatWasVisible = await api<boolean>("suspend_chat_for_pet_drag").catch(() => false);
+    if (!isDragging) {
+      if (chatWasVisible) void api("restore_chat_after_pet_drag");
+      return;
+    }
+    restoreChatAfterDrag = chatWasVisible;
     void appWindow.startDragging().catch(finishDrag);
   };
 
@@ -164,7 +175,7 @@ async function setupGaze() {
   canvas.addEventListener("pointermove", event => {
     if (!pendingDrag || pendingDrag.pointerId !== event.pointerId) return;
     pendingDrag.currentX = event.clientX;
-    if (Math.hypot(event.clientX - pendingDrag.startX, event.clientY - pendingDrag.startY) >= 4) beginDrag();
+    if (Math.hypot(event.clientX - pendingDrag.startX, event.clientY - pendingDrag.startY) >= 4) void beginDrag();
   });
   canvas.addEventListener("click", event => {
     if (event.detail !== 1) return;
@@ -180,6 +191,15 @@ async function setupGaze() {
     manualActionActive = false;
     gazeFollowing = false;
     setState("idle");
+    void api("toggle_chat");
+  });
+  canvas.addEventListener("contextmenu", event => {
+    event.preventDefault();
+    finishDrag();
+    stopInputAnimation();
+    manualActionActive = false;
+    gazeFollowing = false;
+    setState("idle");
     void api("open_action_menu");
   });
   window.addEventListener("pointerup", () => { cancelPendingDrag(); finishDrag(); }, true);
@@ -187,6 +207,7 @@ async function setupGaze() {
 }
 function actionMenuPage() {
   const actions: Array<[string, string, string]> = [
+    ["chat", "和我聊天", "✦"],
     ["follow", "鼠标跟随", "◎"],
     ["idle", "默认待机", "◌"],
     ["waving", "挥手", "◇"],
@@ -204,8 +225,13 @@ function actionMenuPage() {
   for (const [value, label, icon] of actions) {
     const button = document.createElement("button");
     button.dataset.action = value;
-    button.innerHTML = `<span class="action-icon">${icon}</span><span>${label}</span>${value === "follow" ? `<small>视线持续跟随光标</small>` : ""}`;
+    button.innerHTML = `<span class="action-icon">${icon}</span><span>${label}</span>${value === "chat" ? `<small>打开宠物聊天面板</small>` : value === "follow" ? `<small>视线持续跟随光标</small>` : ""}`;
     button.onclick = async () => {
+      if (value === "chat") {
+        await api("open_chat");
+        await appWindow.hide();
+        return;
+      }
       list.querySelectorAll("button").forEach(item => { item.classList.remove("selected"); item.setAttribute("aria-pressed", "false"); });
       button.classList.add("selected");
       button.setAttribute("aria-pressed", "true");
@@ -217,6 +243,250 @@ function actionMenuPage() {
   document.querySelector<HTMLButtonElement>("#close-panel")!.onclick = () => { void appWindow.hide(); };
   document.querySelector<HTMLButtonElement>("#quit-app")!.onclick = () => { void api("quit_app"); };
 }
+async function chatPage() {
+  settings = await api<Settings>("get_settings");
+  await refreshPets();
+  const current = pets.find(p => p.manifest.id === settings.currentPetId);
+  const name = current?.manifest.displayName ?? "宠物";
+  document.body.className = "chat-page interactive";
+  document.body.innerHTML = `<main class="chat-panel">
+    <header>
+      <span class="chat-avatar" data-tauri-drag-region>✦</span>
+      <div data-tauri-drag-region><h1 id="chat-pet-name"></h1><p>AI 聊天</p></div>
+      <button id="close-chat" type="button" aria-label="关闭聊天">×</button>
+    </header>
+    <section class="chat-messages" aria-live="polite">
+      <div class="chat-empty"><span>◇</span><strong id="chat-empty-title"></strong><p>在设置中配置 AI 服务后，就可以开始聊天。</p></div>
+    </section>
+    <footer class="chat-composer">
+      <textarea id="chat-input" rows="2" placeholder="输入消息…"></textarea>
+      <button id="chat-send" type="button">发送</button>
+    </footer>
+  </main>`;
+  const updatePetName = (nextName: string) => {
+    document.querySelector("#chat-pet-name")!.textContent = nextName;
+    const emptyTitle = document.querySelector("#chat-empty-title");
+    if (emptyTitle) emptyTitle.textContent = `和 ${nextName} 聊聊天`;
+  };
+  updatePetName(name);
+  const closeButton = document.querySelector<HTMLButtonElement>("#close-chat")!;
+  const closeChat = (event: Event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    void api("hide_chat");
+  };
+  closeButton.onpointerdown = closeChat;
+  closeButton.onclick = closeChat;
+  const messageList = document.querySelector<HTMLElement>(".chat-messages")!;
+  const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+  const send = document.querySelector<HTMLButtonElement>("#chat-send")!;
+  type ChatMessage = { role: "user" | "assistant"; content: string };
+  const histories = new Map<string, ChatMessage[]>();
+  const drafts = new Map<string, string>();
+  const historyFor = (petId: string) => {
+    let history = histories.get(petId);
+    if (!history) {
+      history = [];
+      histories.set(petId, history);
+    }
+    return history;
+  };
+  let activeRequestId: string | undefined;
+  let activeRequestPetId: string | undefined;
+  let activeReplyMessage: ChatMessage | undefined;
+  let activeReply: HTMLElement | undefined;
+  const appendMessage = (role: "user" | "assistant", content: string) => {
+    messageList.querySelector(".chat-empty")?.remove();
+    const item = document.createElement("div");
+    item.className = `chat-message ${role}`;
+    item.textContent = content;
+    messageList.append(item);
+    messageList.scrollTop = messageList.scrollHeight;
+    return item;
+  };
+  const renderHistory = (petId: string, petName: string) => {
+    messageList.replaceChildren();
+    const history = historyFor(petId);
+    if (!history.length) {
+      const empty = document.createElement("div");
+      empty.className = "chat-empty";
+      empty.innerHTML = "<span>◇</span><strong></strong><p>在设置中配置 AI 服务后，就可以开始聊天。</p>";
+      empty.querySelector("strong")!.textContent = `和 ${petName} 聊聊天`;
+      messageList.append(empty);
+      return;
+    }
+    for (const message of history) {
+      const item = appendMessage(message.role, message.content);
+      if (message === activeReplyMessage && petId === activeRequestPetId) activeReply = item;
+    }
+  };
+  const refreshAvailability = async () => {
+    const config = await api<AiServiceConfig>("get_ai_service_config");
+    const ready = config.hasApiKey && Boolean(config.model.trim());
+    input.disabled = !ready;
+    send.disabled = !ready;
+    input.placeholder = ready ? "输入消息…" : "请先在设置中配置 AI 服务和 API Key";
+  };
+  await listen<{ requestId: string; delta: string }>("chat-stream-delta", event => {
+    if (event.payload.requestId !== activeRequestId || !activeReplyMessage) return;
+    activeReplyMessage.content += event.payload.delta;
+    if (activeRequestPetId === settings.currentPetId && activeReply) {
+      activeReply.textContent = activeReplyMessage.content;
+      messageList.scrollTop = messageList.scrollHeight;
+    }
+  });
+  const finishRequest = async (requestId: string) => {
+    if (activeRequestId !== requestId) return;
+    activeRequestId = undefined;
+    activeRequestPetId = undefined;
+    activeReplyMessage = undefined;
+    activeReply = undefined;
+    send.textContent = "发送";
+    await refreshAvailability();
+    if (!input.disabled) input.focus();
+  };
+  const submit = async () => {
+    if (activeRequestId) {
+      await api("cancel_chat_request", { requestId: activeRequestId });
+      return;
+    }
+    const content = input.value.trim();
+    if (!content) return;
+    const requestPetId = settings.currentPetId;
+    const history = historyFor(requestPetId);
+    input.value = "";
+    drafts.set(requestPetId, "");
+    history.push({ role: "user", content });
+    appendMessage("user", content);
+    const replyMessage: ChatMessage = { role: "assistant", content: "" };
+    activeReplyMessage = replyMessage;
+    history.push(replyMessage);
+    activeReply = appendMessage("assistant", "");
+    activeRequestId = crypto.randomUUID();
+    activeRequestPetId = requestPetId;
+    const requestId = activeRequestId;
+    send.textContent = "停止";
+    input.disabled = true;
+    await emitTo("pet", "chat-status", "thinking");
+    try {
+      await api("send_chat_message", { requestId, messages: history.slice(0, -1) });
+      if (!replyMessage.content) replyMessage.content = "已停止生成。";
+      if (settings.currentPetId === requestPetId) await emitTo("pet", "chat-status", "completed");
+    } catch (error) {
+      replyMessage.content = `请求失败：${String(error)}`;
+      if (settings.currentPetId === requestPetId) await emitTo("pet", "chat-status", "failed");
+    } finally {
+      if (settings.currentPetId === requestPetId) {
+        renderHistory(requestPetId, pets.find(p => p.manifest.id === requestPetId)?.manifest.displayName ?? "宠物");
+      }
+      await finishRequest(requestId);
+    }
+  };
+  send.onclick = () => { void submit(); };
+  input.addEventListener("keydown", event => {
+    if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); }
+  });
+  window.addEventListener("keydown", event => { if (event.key === "Escape") void api("hide_chat"); });
+  await listen("settings-changed", async event => {
+    const previousPetId = settings.currentPetId;
+    drafts.set(previousPetId, input.value);
+    settings = event.payload as Settings;
+    await refreshPets();
+    const petName = pets.find(p => p.manifest.id === settings.currentPetId)?.manifest.displayName ?? "宠物";
+    updatePetName(petName);
+    if (previousPetId !== settings.currentPetId) {
+      if (activeRequestId && activeRequestPetId === previousPetId) {
+        const requestId = activeRequestId;
+        if (activeReplyMessage && !activeReplyMessage.content) activeReplyMessage.content = "已停止生成。";
+        activeRequestId = undefined;
+        activeRequestPetId = undefined;
+        activeReplyMessage = undefined;
+        activeReply = undefined;
+        send.textContent = "发送";
+        void api("cancel_chat_request", { requestId });
+      }
+      renderHistory(settings.currentPetId, petName);
+      input.value = drafts.get(settings.currentPetId) ?? "";
+      await refreshAvailability();
+    }
+  });
+  await listen("ai-config-changed", () => { void refreshAvailability(); });
+  await refreshAvailability();
+  renderHistory(settings.currentPetId, name);
+}
+async function aiServiceSettingsPanel() {
+  const panel = document.querySelector<HTMLDivElement>("#ai-service-config");
+  if (!panel) return;
+  panel.innerHTML = `<p class="ai-config-loading">正在读取 AI 配置…</p>`;
+  let config: AiServiceConfig;
+  try {
+    config = await api<AiServiceConfig>("get_ai_service_config");
+  } catch (error) {
+    panel.innerHTML = `<p class="ai-config-status error" role="alert"></p>`;
+    panel.querySelector("p")!.textContent = String(error);
+    return;
+  }
+  panel.innerHTML = `<div class="ai-config-grid">
+    <label>服务类型<select id="aiProvider"><option value="openai-compatible">DeepSeek / OpenAI 兼容接口</option></select></label>
+    <label>API 地址<input id="aiBaseUrl" type="url" spellcheck="false" autocomplete="off" placeholder="https://api.example.com/v1"></label>
+    <label>模型名称<input id="aiModel" type="text" spellcheck="false" autocomplete="off" placeholder="deepseek-v4-flash"></label>
+    <label>API Key<input id="aiApiKey" type="password" spellcheck="false" autocomplete="off"></label>
+  </div>
+  <p class="ai-key-hint">API Key 保存在系统安全凭据存储中，应用设置和日志不会记录明文。</p>
+  <div class="ai-config-actions"><button id="save-ai-config" type="button">保存 AI 配置</button><button id="delete-ai-key" class="secondary danger" type="button">删除 API Key</button></div>
+  <p id="ai-config-status" class="ai-config-status" role="status" aria-live="polite"></p>`;
+  const provider = panel.querySelector<HTMLSelectElement>("#aiProvider")!;
+  const baseUrl = panel.querySelector<HTMLInputElement>("#aiBaseUrl")!;
+  const model = panel.querySelector<HTMLInputElement>("#aiModel")!;
+  const apiKey = panel.querySelector<HTMLInputElement>("#aiApiKey")!;
+  const save = panel.querySelector<HTMLButtonElement>("#save-ai-config")!;
+  const remove = panel.querySelector<HTMLButtonElement>("#delete-ai-key")!;
+  const status = panel.querySelector<HTMLParagraphElement>("#ai-config-status")!;
+  provider.value = config.provider;
+  baseUrl.value = config.baseUrl;
+  model.value = config.model;
+  const reflectKeyStatus = (hasApiKey: boolean) => {
+    apiKey.value = "";
+    apiKey.placeholder = hasApiKey ? "已安全保存；留空表示不更换" : "输入 API Key";
+    remove.disabled = !hasApiKey;
+  };
+  reflectKeyStatus(config.hasApiKey);
+  save.onclick = async () => {
+    status.className = "ai-config-status";
+    status.textContent = "正在保存…";
+    save.disabled = true;
+    try {
+      const next = await api<AiServiceConfig>("save_ai_service_config", {
+        config: { provider: provider.value, baseUrl: baseUrl.value, model: model.value },
+        apiKey: apiKey.value.trim() || null,
+      });
+      baseUrl.value = next.baseUrl;
+      model.value = next.model;
+      reflectKeyStatus(next.hasApiKey);
+      status.textContent = next.hasApiKey ? "AI 配置已保存，API Key 已安全存储。" : "服务配置已保存，请继续填写 API Key。";
+    } catch (error) {
+      status.className = "ai-config-status error";
+      status.textContent = String(error);
+    } finally {
+      save.disabled = false;
+    }
+  };
+  remove.onclick = async () => {
+    if (!window.confirm("确定从系统安全凭据存储中删除 API Key？")) return;
+    remove.disabled = true;
+    status.className = "ai-config-status";
+    status.textContent = "正在删除…";
+    try {
+      await api("delete_ai_api_key");
+      reflectKeyStatus(false);
+      status.textContent = "API Key 已删除。";
+    } catch (error) {
+      remove.disabled = false;
+      status.className = "ai-config-status error";
+      status.textContent = String(error);
+    }
+  };
+}
 function settingsPage() {
   document.body.className = "settings-page interactive";
   const current = pets.find(p => p.manifest.id === settings.currentPetId);
@@ -224,6 +494,7 @@ function settingsPage() {
   const inputAnimationOptions = INPUT_ANIMATIONS.map(([value, label]) => `<option value="${value}" ${value === inputAnimation ? "selected" : ""}>${label} · ${value}</option>`).join("");
   document.body.innerHTML = `<main><h1>桌面宠物</h1><p>当前宠物：<strong>${current?.manifest.displayName ?? "未选择"}</strong></p>
   <section><h2>宠物</h2><div id="pets"></div><button id="import">导入宠物文件夹</button><button id="data">打开宠物数据目录</button><p id="error" role="alert"></p></section>
+  <section><h2>AI 服务</h2><p>配置你自己的 AI 接口，聊天内容将直接发送到该服务。</p><div id="ai-service-config"></div></section>
   <section><h2>显示与交互</h2><label>缩放 <input id="scale" type="range" min="0.5" max="3" step="0.1" value="${settings.scale}"><output id="scale-output">${settings.scale}×</output></label><label>动画速度 <input id="animationSpeed" type="range" min="0.25" max="2" step="0.05" value="${settings.animationSpeed}"><output id="speed-output">${settings.animationSpeed.toFixed(2)}×</output></label>${toggle("inputListeningEnabled", "输入动作监听")}<label class="select-setting">当前宠物的输入动作<select id="inputAnimation" ${settings.inputListeningEnabled ? "" : "disabled"}>${inputAnimationOptions}</select></label>${toggle("clickThrough", "鼠标穿透")}${toggle("alwaysOnTop", "始终置顶")}${toggle("dragEnabled", "允许拖动")}${toggle("autostart", "开机自启")}</section>
   ${import.meta.env.DEV ? `<section><h2>动画调试</h2><div id="debug"></div></section>` : ""}</main>`;
   const list = document.querySelector("#pets")!;
@@ -237,14 +508,24 @@ function settingsPage() {
   document.querySelector("#data")!.addEventListener("click", () => api<string>("pet_data_dir").then(openPath));
   const previewAnimation = (value: string) => { void emitTo("pet", "debug-animation", value); };
   document.querySelector("#debug")?.append(...(["idle","running-right","running-left","waving","jumping","failed","waiting","running","review"] as AnimationName[]).map(n => { const b = document.createElement("button"); b.textContent = n; b.onclick = () => previewAnimation(n); return b; }), ...Array.from({length:16}, (_, d) => { const b=document.createElement("button"); b.textContent=`看 ${d*22.5}°`; b.onclick=()=>previewAnimation(`gaze:${d}`); return b; }));
+  void aiServiceSettingsPanel();
 }
 function toggle(key: keyof Settings, label: string) { return `<label class="toggle">${label}<input type="checkbox" id="${key}" ${settings[key] ? "checked" : ""}></label>`; }
 async function main() {
   const params = new URLSearchParams(location.search);
   if (appWindow.label === "actions" || params.has("actions")) { actionMenuPage(); return; }
+  if (appWindow.label === "chat" || params.has("chat")) { await chatPage(); return; }
   settings = await api<Settings>("get_settings"); await refreshPets(); renderer = new SpriteRenderer(canvas); await loadPet(settings.currentPetId); await applySettings({}); if (appWindow.label === "settings" || params.has("settings")) settingsPage(); else await setupGaze();
   await listen("settings-changed", async event => { const previousPetId = settings.currentPetId; settings = event.payload as Settings; if (appWindow.label === "pet" && previousPetId !== settings.currentPetId) await loadPet(settings.currentPetId); if (appWindow.label === "pet" && !settings.inputListeningEnabled && inputAnimationActive) { stopInputAnimation(); setState("idle"); } else if (appWindow.label === "pet" && inputAnimationActive) { setState(inputAnimationForPet(settings.currentPetId)); } await applyPetWindowSettings(); reflectSettings(); });
   await listen("pet-action", event => { const value = event.payload as string; stopInputAnimation(); if (value === "follow") { manualActionActive = false; gazeFollowing = true; updateGazeNow(); } else { manualActionActive = value !== "idle"; gazeFollowing = false; setState(value as AnimationName); } });
+  await listen("chat-status", event => {
+    const status = event.payload as string;
+    stopInputAnimation();
+    gazeFollowing = false;
+    manualActionActive = false;
+    setState(status === "thinking" ? "running" : status === "completed" ? "review" : "failed");
+    if (status !== "thinking") window.setTimeout(() => setState("idle"), 900);
+  });
   if (appWindow.label === "pet") await listen("global-key-activity", handleGlobalKeyActivity);
   await listen("open-settings", settingsPage); await listen("reset-position", () => appWindow.setPosition(new LogicalPosition(100, 100))); await listen("debug-animation", e => { gazeFollowing = false; const value = e.payload as string; if (value.startsWith("gaze:")) setState("gaze", Number(value.slice(5))); else setState(value as AnimationName); });
   requestAnimationFrame(animate);
